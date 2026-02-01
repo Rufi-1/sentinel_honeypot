@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import json
 import logging
 import database
 import logic
-import requests # Make sure to import this!
+import os
 
 # Setup Logs
 logging.basicConfig(level=logging.INFO)
@@ -12,93 +13,85 @@ logger = logging.getLogger("uvicorn")
 
 app = FastAPI()
 
-# --- BACKGROUND WORKER (The Spy) ---
-def background_tasks_handler(session_id, user_text, agent_text):
-    try:
-        sid = str(session_id)
-        # 1. Save Chat
-        database.save_message(sid, "scammer", user_text)
-        database.save_message(sid, "agent", agent_text)
-        
-        # 2. Extract Intel
-        combined_text = f"{user_text} {agent_text}"
-        intel = logic.extract_intel(combined_text)
-        final_intel = database.update_intel(sid, intel)
-        
-        # 3. REPORT TO GUVI
-        # Only report if we actually found something or chat is ongoing
-        history = database.get_history(sid)
-        
-        # Debug Log
-        logger.info(f"🕵️ Intel Found for {sid}: {final_intel}")
-        
-        if final_intel.get('phishingLinks') or final_intel.get('upiIds') or len(history) > 1:
-            payload = {
-                "sessionId": sid,
-                "scamDetected": True,
-                "totalMessagesExchanged": len(history),
-                "extractedIntelligence": final_intel,
-                "agentNotes": "Sentinel Active"
-            }
-            logger.info(f"🚀 Sending Callback to GUVI: {payload}")
-            
-            requests.post(
-                "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
-                json=payload,
-                timeout=2
-            )
-            logger.info(f"✅ Callback Sent Successfully")
+# --- 1. THE BOUNCER LOGGER (Catches "Hidden" Errors) ---
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # If FastAPI blocks a request, this prints EXACTLY why
+    body = await request.body()
+    logger.error(f"❌ BLOCKED AT DOOR: {exc}")
+    logger.error(f"❌ BAD BODY: {body.decode()}")
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-    except Exception as e:
-        logger.error(f"⚠️ Background Error: {e}")
-
+# --- 2. THE UNIVERSAL ENDPOINT (Zero Rules) ---
 @app.post("/api/chat")
-async def chat_endpoint(request: Request, bg_tasks: BackgroundTasks):
+async def chat_endpoint(request: Request):
     try:
-        # 1. READ RAW DATA
+        # A. LOG RAW DATA
         body_bytes = await request.body()
+        body_str = body_bytes.decode()
+        logger.info(f"📥 RAW INCOMING DATA: {body_str}")
+
+        # B. PARSE JSON SAFELY
         try:
-            payload = json.loads(body_bytes.decode())
-            logger.info(f"📥 INCOMING: {payload}")
+            payload = json.loads(body_str)
         except:
             payload = {}
 
-        # 2. EXTRACT DATA (Safely)
-        session_id = payload.get("sessionId") or payload.get("session_id") or "test-session"
+        # C. EXTRACT DATA (With Fallbacks)
+        # Handle "sessionId" OR "session_id"
+        session_id = payload.get("sessionId") or payload.get("session_id") or "fallback-session"
         
+        # Handle "message" as dict OR string
         msg_data = payload.get("message", {})
         if isinstance(msg_data, dict):
             user_text = msg_data.get("text", "Hello")
         else:
             user_text = str(msg_data)
 
-        # 3. AI LOGIC
+        # D. CORE LOGIC
+        # 1. Get/Create Session
         session = database.get_session(session_id)
         if not session:
-            # New Session
-            database.create_session(session_id, logic.select_random_persona())
-            session = {"persona_id": "grandma", "is_scam": False}
+            # If session doesn't exist, start fresh
+            persona = logic.select_random_persona()
+            database.create_session(session_id, persona)
+            session = {"persona_id": persona, "is_scam": False}
 
-        # Generate Reply
+        # 2. Generate Reply (Using your fixed logic.py)
         history = database.get_history(session_id)
-        reply = logic.generate_reply(user_text, history, session.get('persona_id', 'grandma'))
+        current_persona = session.get('persona_id', 'grandma')
+        reply = logic.generate_reply(user_text, history, current_persona)
 
-        # 4. QUEUE BACKGROUND TASK (Crucial for GUVI)
-        bg_tasks.add_task(background_tasks_handler, session_id, user_text, reply)
+        # 3. BACKGROUND TASKS (Simplified for stability)
+        # We run this immediately to ensure data is saved
+        try:
+            database.save_message(session_id, "scammer", user_text)
+            database.save_message(session_id, "agent", reply)
+            
+            # Simple Intel Extraction
+            intel = logic.extract_intel(user_text + " " + reply)
+            database.update_intel(session_id, intel)
+        except Exception as db_err:
+            logger.error(f"⚠️ Database Error: {db_err}")
 
-        # 5. RETURN SUCCESS
+        # E. RETURN SUCCESS
+        logger.info(f"✅ REPLYING: {reply}")
         return {
             "status": "success",
             "reply": reply
         }
 
     except Exception as e:
-        logger.error(f"🔥 CRITICAL: {e}")
-        return {"status": "success", "reply": "I am having trouble connecting."}
+        logger.error(f"🔥 CRITICAL CRASH: {e}")
+        # Always return JSON, never crash
+        return {
+            "status": "error",
+            "reply": "System maintenance. Please try again."
+        }
 
 @app.get("/")
 def home():
-    return {"status": "Online"}
+    return {"status": "ONLINE", "mode": "NUCLEAR"}
 
 if __name__ == "__main__":
     import uvicorn
