@@ -1,8 +1,6 @@
 fastapi
 uvicorn
 requests
-google-genai
+google-generativeai
 pydantic
 python-dotenv
-streamlit
-pandas
