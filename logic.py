@@ -1,43 +1,37 @@
-# logic.py
 import os
 import re
 import random
 import personas
 from google import genai
-from google.genai import types
 
-# --- CONFIG ---
-# Hardcode key for easier deployment or use os.environ
-# logic.py
+# 1. SECURE KEY EXTRACTION
+# We use os.environ.get to safely read the key from Render
+API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# ... imports ...
-import os # Make sure this is imported at the top
-
-# OLD WAY (BAD - Delete this line):
-# API_KEY = "AIzaSy......" 
-
-# NEW WAY (GOOD - Safe):
-API_KEY = os.environ.get("GEMINI_API_KEY") 
+# Safety Check: If key is missing, print it to logs (masked)
+if not API_KEY:
+    print("❌ CRITICAL: GEMINI_API_KEY is missing in Environment Variables!")
+else:
+    print(f"✅ API Key Loaded (starts with {API_KEY[:4]}...)")
 
 client = genai.Client(api_key=API_KEY)
 
 def detect_scam(text: str) -> bool:
-    """Fast check: Is this a scam?"""
     try:
+        # Switch to 2.5-flash (More stable)
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash", 
             contents=f"Analyze intent: '{text}'. If scam/phishing/urgent money, reply SCAM. Else reply SAFE."
         )
         return "SCAM" in response.text.upper()
-    except:
-        return True # Default to caution
+    except Exception as e:
+        print(f"⚠️ Detect Scam Error: {e}")
+        return True 
 
 def select_random_persona():
-    """Polymorphic Selector"""
     return random.choice(list(personas.CHARACTERS.keys()))
 
 def generate_reply(incoming_msg, history, persona_id):
-    """Becomes the specific character."""
     char = personas.CHARACTERS.get(persona_id, personas.CHARACTERS['grandma'])
     chat_log = "\n".join([f"{m['sender']}: {m['text']}" for m in history])
     
@@ -45,7 +39,7 @@ def generate_reply(incoming_msg, history, persona_id):
     SYSTEM: You are {char['name']}, a {char['role']}.
     TRAITS: {char['style']}
     STRATEGY: {char['strategy']}
-    TASK: Reply to the scammer. Keep it short (1-2 sentences). Do NOT expose yourself.
+    TASK: Reply to the scammer. Keep it short. Do NOT expose yourself.
     
     CHAT LOG:
     {chat_log}
@@ -53,14 +47,18 @@ def generate_reply(incoming_msg, history, persona_id):
     {char['name']}:
     """
     try:
-        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        # Switch to 2.5-flash
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents=prompt
+        )
         return response.text.strip()
-    except:
-        return "I am confused. Can you say that again?"
+    except Exception as e:
+        print(f"❌ AI Reply Error: {e}")
+        return "Oh dear, my internet is slow. Can you explain that simply?"
 
 def extract_intel(text):
-    """Hybrid: Regex + AI for tricky data."""
-    # 1. Regex Pass (Fast)
+    # Regex + Basic keyword checks
     data = {
         "upiIds": re.findall(r"[\w\.-]+@[\w\.-]+", text),
         "phishingLinks": re.findall(r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+", text),
@@ -68,17 +66,6 @@ def extract_intel(text):
         "bankAccounts": re.findall(r"\b\d{9,18}\b", text),
         "suspiciousKeywords": []
     }
-    
-    # 2. AI Clean-up Pass (Smart) - runs if numbers found
-    if any(char.isdigit() for char in text):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=f"Extract ONLY bank account numbers and UPI IDs from this text: '{text}'. Return JSON."
-            )
-            # (Simplified: In production, parse this JSON to augment regex results)
-        except:
-            pass
-            
-
+    if "blocked" in text.lower() or "urgent" in text.lower():
+        data["suspiciousKeywords"].append("Urgency")
     return data
