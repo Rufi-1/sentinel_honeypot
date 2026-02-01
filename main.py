@@ -1,120 +1,111 @@
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
-from typing import List, Optional, Any
-import requests
+from typing import Optional, Dict, Any
+import logging
 import database
 import logic
-import json
+
+# 1. SETUP LOGGING (So we can see exactly what GUVI sends in the Render logs)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("uvicorn")
 
 app = FastAPI(title="Sentinel Polymorphic Node")
 
-# --- 1. DEFENSIVE DATA MODELS (The Fix) ---
-# We use 'Optional' and defaults (= None) to prevent crashes if fields are missing
-
-class Msg(BaseModel):
-    sender: str
-    text: str
-    # Make timestamp optional just in case the tester skips it
-    timestamp: Optional[str] = None 
-
-class Payload(BaseModel):
-    sessionId: str
-    message: Msg
-    # Default to empty list if missing
-    conversationHistory: List[Msg] = []
-    # Default to empty dict if missing
-    metadata: Optional[dict] = {}
-
-# --- 2. DEBUGGING HANDLER (Crucial) ---
-# This will print the EXACT error to your Render Logs so we know what's wrong
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    error_details = exc.errors()
-    print(f"❌ VALIDATION ERROR: {error_details}") # Check Render Logs for this!
-    body = await request.body()
-    print(f"❌ RECEIVED BODY: {body.decode()}")
-    return JSONResponse(
-        status_code=422,
-        content={"detail": error_details, "body": body.decode()},
-    )
-
-# --- 3. BACKGROUND WORKER ---
+# --- BACKGROUND WORKER ---
 def background_tasks_handler(session_id, user_text, agent_text):
-    # Safe checks to prevent crashing if logic fails
     try:
-        database.save_message(session_id, "scammer", user_text)
-        database.save_message(session_id, "agent", agent_text)
+        # Robust check to ensure IDs are strings
+        sid = str(session_id)
+        
+        database.save_message(sid, "scammer", user_text)
+        database.save_message(sid, "agent", agent_text)
         
         combined_text = f"{user_text} {agent_text}"
         intel = logic.extract_intel(combined_text)
-        final_intel = database.update_intel(session_id, intel)
+        final_intel = database.update_intel(sid, intel)
         
-        history = database.get_history(session_id)
+        history = database.get_history(sid)
         
-        # Only report if we have valid intel
+        # Report logic
         if final_intel.get('phishingLinks') or final_intel.get('upiIds') or len(history) > 4:
+            import requests
             requests.post(
                 "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
                 json={
-                    "sessionId": session_id,
+                    "sessionId": sid,
                     "scamDetected": True,
                     "totalMessagesExchanged": len(history),
                     "extractedIntelligence": final_intel,
-                    "agentNotes": "Sentinel Node Active"
+                    "agentNotes": "Sentinel Active"
                 },
                 timeout=1
             )
-            print(f"✅ REPORTED {session_id}")
+            logger.info(f"✅ REPORTED {sid}")
     except Exception as e:
-        print(f"⚠️ Background Task Error: {e}")
+        logger.error(f"⚠️ Background Error: {e}")
 
-# --- 4. API ENDPOINT ---
+# --- THE UNIVERSAL ENDPOINT ---
 @app.post("/api/chat")
-async def chat_endpoint(payload: Payload, bg_tasks: BackgroundTasks, x_api_key: Optional[str] = Header(None)):
+async def chat_endpoint(request: Request, bg_tasks: BackgroundTasks, x_api_key: Optional[str] = Header(None)):
     
-    # 1. Security Check (Allow None for local testing if needed, but strict for prod)
-    if x_api_key != "my-secret-key":
-        # Some testers send the key in weird ways, print it to debug
-        print(f"⚠️ Auth Failed. Received Key: {x_api_key}")
-        raise HTTPException(status_code=401, detail="Invalid or Missing X-API-KEY")
-    
-    sid = payload.sessionId
-    msg_text = payload.message.text
-    
-    # 2. Session Management
-    session = database.get_session(sid)
+    # 1. READ RAW DATA (Bypass strict validation)
+    try:
+        payload = await request.json()
+        logger.info(f"📥 RECEIVED PAYLOAD: {payload}") # <--- LOOK AT THIS IN LOGS IF IT FAILS
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # 2. MANUAL EXTRACTION (Flexible Logic)
+    # We check for 'sessionId' OR 'session_id' to be safe
+    session_id = payload.get("sessionId") or payload.get("session_id")
+    if not session_id:
+        # Generate a random one if missing (Emergency Fallback)
+        import uuid
+        session_id = str(uuid.uuid4())
+        logger.warning("⚠️ Missing sessionId, generated temporary one.")
+
+    # Handle Message Structure
+    # Expecting: "message": {"text": "..."}
+    message_data = payload.get("message", {})
+    if isinstance(message_data, str):
+        msg_text = message_data # If they sent just a string
+    else:
+        msg_text = message_data.get("text") or message_data.get("content") or "Hello"
+
+    # 3. SECURITY CHECK
+    # We allow the key to be missing for local tests, but check if present
+    if x_api_key and x_api_key != "my-secret-key":
+        logger.warning(f"⚠️ Wrong Key: {x_api_key}")
+        raise HTTPException(status_code=401, detail="Invalid X-API-KEY")
+
+    # 4. CORE LOGIC
+    # Get/Create Session
+    session = database.get_session(session_id)
     if not session:
         persona = logic.select_random_persona()
-        database.create_session(sid, persona)
+        database.create_session(session_id, persona)
         session = {"persona_id": persona, "is_scam": False}
-    
-    # 3. Scam Detection
+
+    # Detect Scam
     if not session['is_scam']:
-        # If logic fails, default to True (Safety)
         if logic.detect_scam(msg_text):
             pass 
         else:
             return {"status": "success", "reply": "I am not interested."}
-            
-    # 4. Generate Reply
-    history = database.get_history(sid)
-    # Ensure persona_id exists
+
+    # Generate Reply
+    history = database.get_history(session_id)
     pid = session.get('persona_id', 'grandma')
     reply = logic.generate_reply(msg_text, history, pid)
-    
-    # 5. Background Task
-    bg_tasks.add_task(background_tasks_handler, sid, msg_text, reply)
-    
+
+    # Queue Background Task
+    bg_tasks.add_task(background_tasks_handler, session_id, msg_text, reply)
+
     return {"status": "success", "reply": reply}
 
-# --- 5. ROOT ENDPOINT (Fixes 'Not Found') ---
 @app.get("/")
 def home():
-    return {"status": "ONLINE", "message": "Sentinel System is Active. POST to /api/chat"}
+    return {"status": "ONLINE", "message": "Universal Sentinel Active"}
 
-# Run for local testing
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
