@@ -11,17 +11,16 @@ import sqlite3
 import requests
 from google import genai
 
-# --- 1. CONFIGURATION & LOGS ---
+# --- 1. CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn")
 
-# Hardcode Key for Hackathon Stability (Replace if needed)
-# Or ensure GEMINI_API_KEY is set in Render
+# HARDCODE KEY HERE IF RENDER KEEPS FAILING
 API_KEY = os.environ.get("GEMINI_API_KEY") 
 
 app = FastAPI()
 
-# --- 2. CORS & MIDDLEWARE (The Open Door) ---
+# --- 2. OPEN ACCESS (CORS) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,7 +42,7 @@ async def log_requests(request: Request, call_next):
         logger.error(f"🔥 CRASH: {e}")
         return JSONResponse(status_code=500, content={"detail": str(e)})
 
-# --- 3. DATABASE MODULE (Integrated) ---
+# --- 3. DATABASE ---
 DB_NAME = "honeypot.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -57,7 +56,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db() # Run on start
+init_db()
 
 def get_session(sid):
     with sqlite3.connect(DB_NAME, check_same_thread=False) as conn:
@@ -95,10 +94,10 @@ def update_intel(sid, new_data):
         conn.execute("UPDATE intelligence SET data=? WHERE session_id=?", (json.dumps(current), sid))
     return current
 
-# --- 4. LOGIC & PERSONAS MODULE (Integrated) ---
+# --- 4. LOGIC ---
 CHARACTERS = {
-    "grandma": {"name": "Mrs. Higgins", "role": "74yo Grandma", "style": "Confused, slow", "strategy": "Act confused"},
-    "student": {"name": "Rohan", "role": "Student", "style": "Panicked, slang", "strategy": "Ask if legit"}
+    "grandma": {"name": "Mrs. Higgins", "role": "Grandma", "style": "Confused", "strategy": "Act confused"},
+    "student": {"name": "Rohan", "role": "Student", "style": "Bro, slang", "strategy": "Troll"}
 }
 
 def get_client():
@@ -114,8 +113,8 @@ def generate_reply(incoming, history, pid):
     hist_text = "\n".join([f"{m['sender']}: {m['text']}" for m in history])
     
     prompt = f"""
-    Act as {char['name']} ({char['role']}). Style: {char['style']}.
-    Reply to the scammer. Keep it short.
+    Act as {char['name']}. Style: {char['style']}.
+    Reply to scammer. Keep it short.
     History: {hist_text}
     Scammer: {incoming}
     Reply:
@@ -133,10 +132,9 @@ def extract_intel(text):
         "phishingLinks": re.findall(r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+", text),
         "phoneNumbers": re.findall(r"(?:\+91|0)?[6-9]\d{9}", text),
         "bankAccounts": re.findall(r"\b\d{9,18}\b", text),
-        "suspiciousKeywords": ["urgent", "block"] if "urgent" in text.lower() else []
+        "suspiciousKeywords": ["urgent"] if "urgent" in text.lower() else []
     }
 
-# --- 5. BACKGROUND WORKER ---
 def bg_task(sid, user_text, agent_text):
     try:
         save_message(sid, "scammer", user_text)
@@ -156,10 +154,18 @@ def bg_task(sid, user_text, agent_text):
     except Exception as e:
         logger.error(f"BG Error: {e}")
 
-# --- 6. API ENDPOINTS ---
+# --- 5. ENDPOINTS (FIXED) ---
+
+# Allow HEAD requests (Pings)
 @app.head("/")
 @app.head("/api/chat")
-def ping(): return Response(status_code=200)
+def ping(): 
+    return Response(status_code=200)
+
+# Allow GET requests (Browser Visits) - THIS WAS MISSING
+@app.get("/")
+def home():
+    return {"status": "ONLINE", "system": "Sentinel Polymorphic Node"}
 
 @app.post("/api/chat")
 async def chat(request: Request, bg_tasks: BackgroundTasks):
