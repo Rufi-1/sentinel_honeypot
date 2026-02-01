@@ -9,7 +9,7 @@ import re
 import random
 import sqlite3
 import requests
-from google import genai
+import google.generativeai as genai # <--- CHANGED THIS IMPORT
 
 # --- 1. CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +17,12 @@ logger = logging.getLogger("uvicorn")
 
 # HARDCODE KEY HERE IF RENDER KEEPS FAILING
 API_KEY = os.environ.get("GEMINI_API_KEY") 
+
+# CONFIGURE AI (The Stable Way)
+if API_KEY:
+    genai.configure(api_key=API_KEY)
+else:
+    logger.error("❌ API KEY MISSING")
 
 app = FastAPI()
 
@@ -100,14 +106,8 @@ CHARACTERS = {
     "student": {"name": "Rohan", "role": "Student", "style": "Bro, slang", "strategy": "Troll"}
 }
 
-def get_client():
-    if not API_KEY: return None
-    try: return genai.Client(api_key=API_KEY)
-    except: return None
-
 def generate_reply(incoming, history, pid):
-    client = get_client()
-    if not client: return "I am having connection issues."
+    if not API_KEY: return "I am having connection issues."
     
     char = CHARACTERS.get(pid, CHARACTERS['grandma'])
     hist_text = "\n".join([f"{m['sender']}: {m['text']}" for m in history])
@@ -120,7 +120,9 @@ def generate_reply(incoming, history, pid):
     Reply:
     """
     try:
-        res = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        # USE STABLE MODEL CALL
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        res = model.generate_content(prompt)
         return res.text.strip()
     except Exception as e:
         logger.error(f"AI Error: {e}")
@@ -154,15 +156,13 @@ def bg_task(sid, user_text, agent_text):
     except Exception as e:
         logger.error(f"BG Error: {e}")
 
-# --- 5. ENDPOINTS (FIXED) ---
+# --- 5. ENDPOINTS ---
 
-# Allow HEAD requests (Pings)
 @app.head("/")
 @app.head("/api/chat")
 def ping(): 
     return Response(status_code=200)
 
-# Allow GET requests (Browser Visits) - THIS WAS MISSING
 @app.get("/")
 def home():
     return {"status": "ONLINE", "system": "Sentinel Polymorphic Node"}
