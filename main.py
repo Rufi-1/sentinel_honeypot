@@ -6,7 +6,20 @@ import requests
 import database
 import logic
 
+# main.py
+
 app = FastAPI(title="Sentinel Polymorphic Node")
+
+# --- ADD THIS NEW SECTION ---
+@app.get("/")
+def home():
+    return {
+        "status": "ONLINE",
+        "system": "Sentinel Polymorphic HoneyPot",
+        "version": "1.0.0",
+        "message": "System is active. Send POST requests to /api/chat"
+    }
+# -----------------------------
 
 class Msg(BaseModel):
     sender: str
@@ -81,4 +94,5 @@ async def chat_endpoint(payload: Payload, bg_tasks: BackgroundTasks, x_api_key: 
     # 4. Async Work (Speed)
     bg_tasks.add_task(background_tasks_handler, sid, msg, reply)
     
+
     return {"status": "success", "reply": reply}
