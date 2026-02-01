@@ -9,24 +9,19 @@ import re
 import random
 import sqlite3
 import requests
-import google.generativeai as genai # <--- CHANGED THIS IMPORT
+import google.generativeai as genai
 
-# --- 1. CONFIGURATION ---
+# --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn")
 
-# HARDCODE KEY HERE IF RENDER KEEPS FAILING
 API_KEY = os.environ.get("GEMINI_API_KEY") 
-
-# CONFIGURE AI (The Stable Way)
 if API_KEY:
     genai.configure(api_key=API_KEY)
-else:
-    logger.error("❌ API KEY MISSING")
 
 app = FastAPI()
 
-# --- 2. OPEN ACCESS (CORS) ---
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,20 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    logger.info(f"🔔 KNOCK: {request.method} {request.url}")
-    try:
-        response = await call_next(request)
-        process_time = (time.time() - start_time) * 1000
-        logger.info(f"✅ RESP: {response.status_code} ({process_time:.2f}ms)")
-        return response
-    except Exception as e:
-        logger.error(f"🔥 CRASH: {e}")
-        return JSONResponse(status_code=500, content={"detail": str(e)})
-
-# --- 3. DATABASE ---
+# --- DATABASE ---
 DB_NAME = "honeypot.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -100,7 +82,7 @@ def update_intel(sid, new_data):
         conn.execute("UPDATE intelligence SET data=? WHERE session_id=?", (json.dumps(current), sid))
     return current
 
-# --- 4. LOGIC ---
+# --- LOGIC ---
 CHARACTERS = {
     "grandma": {"name": "Mrs. Higgins", "role": "Grandma", "style": "Confused", "strategy": "Act confused"},
     "student": {"name": "Rohan", "role": "Student", "style": "Bro, slang", "strategy": "Troll"}
@@ -112,15 +94,15 @@ def generate_reply(incoming, history, pid):
     char = CHARACTERS.get(pid, CHARACTERS['grandma'])
     hist_text = "\n".join([f"{m['sender']}: {m['text']}" for m in history])
     
+    # Optimized prompt for speed
     prompt = f"""
-    Act as {char['name']}. Style: {char['style']}.
-    Reply to scammer. Keep it short.
-    History: {hist_text}
+    Role: {char['name']} ({char['style']}).
+    Task: Reply to scammer. Max 10 words.
+    Chat: {hist_text}
     Scammer: {incoming}
     Reply:
     """
     try:
-        # USE STABLE MODEL CALL
         model = genai.GenerativeModel('gemini-2.5-flash')
         res = model.generate_content(prompt)
         return res.text.strip()
@@ -156,22 +138,18 @@ def bg_task(sid, user_text, agent_text):
     except Exception as e:
         logger.error(f"BG Error: {e}")
 
-# --- 5. ENDPOINTS ---
-
+# --- ENDPOINTS ---
 @app.head("/")
 @app.head("/api/chat")
-def ping(): 
-    return Response(status_code=200)
+def ping(): return Response(status_code=200)
 
 @app.get("/")
-def home():
-    return {"status": "ONLINE", "system": "Sentinel Polymorphic Node"}
+def home(): return {"status": "ONLINE"}
 
 @app.post("/api/chat")
 async def chat(request: Request, bg_tasks: BackgroundTasks):
     try:
         body = await request.body()
-        logger.info(f"📥 RAW: {body.decode()}")
         try: payload = json.loads(body.decode())
         except: payload = {}
 
@@ -186,6 +164,11 @@ async def chat(request: Request, bg_tasks: BackgroundTasks):
             session = {"persona_id": pid}
 
         reply = generate_reply(text, get_history(sid), session['persona_id'])
+        
+        # --- NEW LOGGING ---
+        logger.info(f"🤖 AI REPLY: {reply}") 
+        # -------------------
+
         bg_tasks.add_task(bg_task, sid, text, reply)
 
         return {"status": "success", "reply": reply}
