@@ -8,7 +8,17 @@ from google.genai import types
 
 # --- CONFIG ---
 # Hardcode key for easier deployment or use os.environ
-API_KEY = "AIzaSyAGMhoa56JyFmsQTio_SZC6GHs2tFSnKNU" 
+# logic.py
+
+# ... imports ...
+import os # Make sure this is imported at the top
+
+# OLD WAY (BAD - Delete this line):
+# API_KEY = "AIzaSy......" 
+
+# NEW WAY (GOOD - Safe):
+API_KEY = os.environ.get("GEMINI_API_KEY") 
+
 client = genai.Client(api_key=API_KEY)
 
 def detect_scam(text: str) -> bool:
@@ -70,4 +80,5 @@ def extract_intel(text):
         except:
             pass
             
+
     return data
