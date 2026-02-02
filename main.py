@@ -11,7 +11,7 @@ import sqlite3
 import requests
 import google.generativeai as genai
 
-# --- CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn")
 
@@ -21,7 +21,7 @@ if API_KEY:
 
 app = FastAPI()
 
-# --- CORS ---
+# --- 2. CORS (Open Access) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- DATABASE ---
+# --- 3. DATABASE MODULE ---
 DB_NAME = "honeypot.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -82,23 +82,41 @@ def update_intel(sid, new_data):
         conn.execute("UPDATE intelligence SET data=? WHERE session_id=?", (json.dumps(current), sid))
     return current
 
-# --- LOGIC ---
+# --- 4. MULTI-CHARACTER LOGIC ---
 CHARACTERS = {
-    "grandma": {"name": "Mrs. Higgins", "role": "Grandma", "style": "Confused", "strategy": "Act confused"},
-    "student": {"name": "Rohan", "role": "Student", "style": "Bro, slang", "strategy": "Troll"}
+    "grandma": {
+        "name": "Mrs. Higgins", 
+        "style": "Confused, 74 years old, bad with technology", 
+        "opener": "Hello? Is this my grandson? I can't read this message clearly without my glasses."
+    },
+    "student": {
+        "name": "Rohan", 
+        "style": "College student, slang, busy with exams, skeptical", 
+        "opener": "Yo, who is this? Do I know you? I'm in class right now."
+    },
+    "uncle": {
+        "name": "Uncle Raj", 
+        "style": "Angry, suspicious, asks too many questions, rude", 
+        "opener": "Who gave you this number? Speak quickly, I am busy!"
+    }
 }
 
 def generate_reply(incoming, history, pid):
     if not API_KEY: return "I am having connection issues."
     
+    # Fallback to grandma if persona missing
     char = CHARACTERS.get(pid, CHARACTERS['grandma'])
     hist_text = "\n".join([f"{m['sender']}: {m['text']}" for m in history])
     
-    # Optimized prompt for speed
     prompt = f"""
-    Role: {char['name']} ({char['style']}).
-    Task: Reply to scammer. Max 10 words.
-    Chat: {hist_text}
+    You are {char['name']}. Traits: {char['style']}.
+    Task: Reply to this scammer. Keep it short (1-2 sentences).
+    - Do NOT say you are an AI.
+    - Act exactly like your character.
+    
+    Conversation History:
+    {hist_text}
+    
     Scammer: {incoming}
     Reply:
     """
@@ -108,7 +126,7 @@ def generate_reply(incoming, history, pid):
         return res.text.strip()
     except Exception as e:
         logger.error(f"AI Error: {e}")
-        return "I am confused. Say again?"
+        return "I am confused. Can you say that again?"
 
 def extract_intel(text):
     return {
@@ -116,7 +134,7 @@ def extract_intel(text):
         "phishingLinks": re.findall(r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+", text),
         "phoneNumbers": re.findall(r"(?:\+91|0)?[6-9]\d{9}", text),
         "bankAccounts": re.findall(r"\b\d{9,18}\b", text),
-        "suspiciousKeywords": ["urgent"] if "urgent" in text.lower() else []
+        "suspiciousKeywords": ["urgent", "block", "otp", "kfc", "verify"] if any(x in text.lower() for x in ["urgent", "block", "otp", "verify"]) else []
     }
 
 def bg_task(sid, user_text, agent_text):
@@ -133,21 +151,23 @@ def bg_task(sid, user_text, agent_text):
                 "totalMessagesExchanged": len(hist),
                 "extractedIntelligence": final_intel, "agentNotes": "Sentinel Active"
             }
-            logger.info(f"🚀 Callback: {payload}")
-            requests.post("https://hackathon.guvi.in/api/updateHoneyPotFinalResult", json=payload, timeout=2)
+            # Fire and forget callback
+            requests.post("https://hackathon.guvi.in/api/updateHoneyPotFinalResult", json=payload, timeout=1)
     except Exception as e:
         logger.error(f"BG Error: {e}")
 
-# --- ENDPOINTS ---
+# --- 5. ENDPOINTS ---
+
 @app.head("/")
 @app.head("/api/chat")
 def ping(): return Response(status_code=200)
 
 @app.get("/")
-def home(): return {"status": "ONLINE"}
+def home(): return {"status": "ONLINE", "characters": list(CHARACTERS.keys())}
 
 @app.post("/api/chat")
 async def chat(request: Request, bg_tasks: BackgroundTasks):
+    start = time.time()
     try:
         body = await request.body()
         try: payload = json.loads(body.decode())
@@ -157,20 +177,32 @@ async def chat(request: Request, bg_tasks: BackgroundTasks):
         msg = payload.get("message", {})
         text = msg.get("text", "Hello") if isinstance(msg, dict) else str(msg)
 
+        # 1. SETUP SESSION (Randomly pick 1 of 3 characters)
         session = get_session(sid)
         if not session:
-            pid = random.choice(list(CHARACTERS.keys()))
+            # THIS IS WHERE THE MAGIC HAPPENS
+            pid = random.choice(list(CHARACTERS.keys())) 
             create_session(sid, pid)
             session = {"persona_id": pid}
-
-        reply = generate_reply(text, get_history(sid), session['persona_id'])
         
-        # --- NEW LOGGING ---
-        logger.info(f"🤖 AI REPLY: {reply}") 
-        # -------------------
+        current_history = get_history(sid)
+        persona_id = session['persona_id']
+
+        # 2. INSTANT REPLY (Specific to the chosen character)
+        if len(current_history) == 0:
+            # If randomly picked Student, says "Yo". If Grandma, says "Hello?".
+            reply = CHARACTERS.get(persona_id, CHARACTERS['grandma'])['opener']
+            logger.info(f"⚡ INSTANT OPENER SENT for {persona_id}")
+        else:
+            # 3. AI REPLY (Gemini takes over personality)
+            reply = generate_reply(text, current_history, persona_id)
+            logger.info(f"🤖 AI REPLY SENT for {persona_id}")
 
         bg_tasks.add_task(bg_task, sid, text, reply)
 
+        process_time = (time.time() - start) * 1000
+        logger.info(f"✅ DONE in {process_time:.2f}ms")
+        
         return {"status": "success", "reply": reply}
 
     except Exception as e:
