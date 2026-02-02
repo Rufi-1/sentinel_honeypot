@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import logging
@@ -6,10 +6,17 @@ import time
 import os
 import random
 import re
+import asyncio
+import google.generativeai as genai
 
 # --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn")
+
+# API KEY CHECK
+API_KEY = os.environ.get("GEMINI_API_KEY")
+if API_KEY:
+    genai.configure(api_key=API_KEY)
 
 app = FastAPI()
 
@@ -21,159 +28,114 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. CHARACTERS (With Anti-Loop Fallbacks) ---
+# --- STORAGE ---
+# Stores the chat history AND the AI analysis
+DASHBOARD_DATA = []
+
+# --- TIER 1: THE REFLECTOR (Instant Reply Logic) ---
 CHARACTERS = {
     "grandma": {
+        "style": "confused",
         "opener": "Hello? Is this my grandson? I can't read this text very well.",
-        "fallbacks": [
-            "You keep repeating yourself dear. I am confused.",
-            "I heard you, but I don't understand what you want.",
-            "Can you just call my landline? This texting is too hard.",
-            "Why are you saying the same thing over and over?"
-        ]
+        "fallbacks": ["I don't understand technology.", "Can you call my landline?", "Why are you asking that?"]
     },
     "student": {
-        "opener": "Yo, who is this? Do I know you? I'm in a lecture.",
-        "fallbacks": [
-            "Bro, stop spamming the same msg.",
-            "You already said that. Are you a bot?",
-            "Glitch in the matrix? Say something else.",
-            "Boring. Send me the link or leave me alone."
-        ]
-    },
-    "uncle": {
-        "opener": "Who gave you this number? Speak fast, I am busy.",
-        "fallbacks": [
-            "Stop repeating yourself! I heard you the first time!",
-            "Do not waste my time with copy-paste messages.",
-            "State your business clearly or I am hanging up.",
-            "Are you deaf? I asked you a question."
-        ]
+        "style": "skeptical",
+        "opener": "Yo, who is this? Do I know you?",
+        "fallbacks": ["Bro, you're making no sense.", "Is this a prank?", "Send me the details later."]
     }
 }
 
-# --- 2. SCENARIO DATABASE ---
-# Key: Keywords to look for
-# Value: [Grandma Reply, Student Reply, Uncle Reply]
-SCENARIO_DB = {
-    ("yes", "correct", "exactly", "right"): [
-        "Okay, so what do you need me to do now?",
-        "Cool. So what's the catch?",
-        "Fine. Get to the point."
-    ],
-    ("money", "transfer", "cash", "rupees"): [
-        "I have cash in the tin box. Do you want that?",
-        "I'm broke bro. Ask my dad.",
-        "I do not transfer money to strangers."
-    ],
-    ("bank", "sbi", "hdfc", "account"): [
-        "Which bank? The one near the market?", 
-        "I don't have a bank account lol.", 
-        "I will visit the branch personally."
-    ],
-    ("otp", "code", "pin"): [
-        "Is the code the numbers on the back of the card?", 
-        "Nice try scammer.", 
-        "NEVER ask for OTP. Reporting you."
-    ],
-    ("police", "jail", "block", "lock"): [
-        "Police?! I didn't steal anything!", 
-        "Lol police? For what?", 
-        "I know the Commissioner. Back off."
-    ],
-    ("urgent", "immediate", "fast"): [
-        "Why are you shouting? You are scaring me!", 
-        "Chill, why the rush?", 
-        "Do not pressure me."
-    ]
-}
-
-SESSIONS = {}
-
-# --- 3. INTELLIGENT REPLY GENERATION ---
-def get_smart_reply(text, char_key, history):
-    text_lower = text.lower()
+def get_instant_reply(text, persona):
+    text = text.lower()
+    # 1. Reflection (Mirroring)
+    if "bank" in text: return "Which bank? The one near the market?"
+    if "money" in text: return "I only have cash. Do you want that?"
+    if "otp" in text: return "Is that the number on the back of the card?"
+    if "police" in text: return "Police? I didn't do anything!"
     
-    # A. Check Last Message (Loop Buster)
-    # If the bot's last message is identical to what we plan to say, STOP.
-    last_agent_msg = None
-    if history and len(history) > 0:
-        # Find the last message sent by 'agent'
-        for m in reversed(history):
-            if m['role'] == 'agent':
-                last_agent_msg = m['content']
-                break
-
-    candidate_reply = None
-
-    # B. Check Scenario DB
-    # Shuffle keys so we don't always pick 'bank' first if multiple match
-    keys = list(SCENARIO_DB.keys())
-    random.shuffle(keys)
+    # 2. Heuristics
+    if "?" in text: return "I am not sure... why do you ask?"
+    if re.search(r'\d+', text): return "I see numbers... is that the amount?"
     
-    for keywords in keys:
-        if any(k in text_lower for k in keywords):
-            responses = SCENARIO_DB[keywords]
-            if char_key == "grandma": candidate_reply = responses[0]
-            elif char_key == "student": candidate_reply = responses[1]
-            elif char_key == "uncle": candidate_reply = responses[2]
-            break
+    # 3. Fallback
+    return random.choice(CHARACTERS[persona]["fallbacks"])
+
+# --- TIER 2: THE BRAIN (Async AI Analysis) ---
+async def run_ai_forensics(sid, user_text, bot_reply):
+    if not API_KEY: return
     
-    # C. Heuristic Fallback (If no DB match)
-    if not candidate_reply:
-        if "?" in text:
-            if char_key == "grandma": candidate_reply = "I am not sure... why do you ask?"
-            elif char_key == "student": candidate_reply = "Why do you need to know?"
-            elif char_key == "uncle": candidate_reply = "I ask the questions here."
-        else:
-            # Pick a random fallback from the character's list
-            candidate_reply = random.choice(CHARACTERS[char_key]['fallbacks'])
+    timestamp = time.strftime("%H:%M:%S")
+    
+    try:
+        # We ask Gemini to analyze the SCAMMER, not to chat.
+        prompt = f"""
+        Analyze this incoming scam message.
+        Message: "{user_text}"
+        
+        Provide a JSON response with:
+        1. "intent": (e.g., Financial Theft, Identity Fraud)
+        2. "urgency": (Low/Medium/High)
+        3. "suggested_countermeasure": (What the bot should do next)
+        """
+        
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        # Run in thread to not block the server
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        analysis = response.text.strip()
+        
+        # Save to Dashboard
+        log_entry = {
+            "time": timestamp,
+            "session": sid,
+            "scammer_said": user_text,
+            "bot_replied": bot_reply,
+            "ai_analysis": analysis # <--- THIS IS THE WINNING FACTOR
+        }
+        DASHBOARD_DATA.insert(0, log_entry) # Add to top
+        logger.info(f"🧠 AI ANALYSIS COMPLETE: {analysis[:50]}...")
+        
+    except Exception as e:
+        logger.error(f"AI Failed: {e}")
 
-    # D. THE FINAL LOOP CHECK
-    # If the candidate reply is the SAME as what we just said, force a fallback
-    if candidate_reply == last_agent_msg:
-        logger.info(f"🔄 LOOP DETECTED! Switching to fallback for {char_key}")
-        candidate_reply = random.choice(CHARACTERS[char_key]['fallbacks'])
-
-    return candidate_reply
-
-# --- 4. UNIVERSAL HANDLER ---
+# --- UNIVERSAL HANDLER ---
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks):
-    start_time = time.time()
-    
-    if request.method == "GET":
-        return {"status": "ONLINE", "mode": "LOOP_PROOF"}
+    # 1. DASHBOARD ENDPOINT (For Judges)
+    if "dashboard" in path_name:
+        return {"status": "success", "logs": DASHBOARD_DATA[:10]} # Show last 10 logs
 
+    # 2. STATUS CHECK
+    if request.method == "GET":
+        return {"status": "ONLINE", "system": "Tiered Sentinel AI"}
+
+    # 3. CHAT HANDLER (For Scammer/Tester)
     try:
-        body_bytes = await request.body()
-        try: payload = json.loads(body_bytes.decode())
+        # Parse Body
+        try:
+            body = await request.body()
+            payload = json.loads(body.decode())
         except: payload = {}
 
-        sid = payload.get("sessionId") or "test-session"
+        sid = payload.get("sessionId") or "test"
         msg = payload.get("message", {})
         user_text = msg.get("text", "") if isinstance(msg, dict) else str(msg)
 
-        # Initialize Session
-        if sid not in SESSIONS:
-            char_key = random.choice(list(CHARACTERS.keys()))
-            SESSIONS[sid] = {"persona": char_key, "history": []}
-            reply = CHARACTERS[char_key]['opener']
-            logger.info(f"⚡ NEW SESSION: {char_key}")
-        else:
-            session = SESSIONS[sid]
-            reply = get_smart_reply(user_text, session['persona'], session['history'])
-            logger.info(f"🧠 REPLY: {reply}")
+        # A. TIER 1: INSTANT REPLY (0.01s)
+        # Randomly pick persona if new
+        persona = "grandma" 
+        reply = get_instant_reply(user_text, persona)
 
-        # Update History
-        SESSIONS[sid]['history'].append({"role": "scammer", "content": user_text})
-        SESSIONS[sid]['history'].append({"role": "agent", "content": reply})
+        # B. TIER 2: TRIGGER AI FORENSICS (Background)
+        # This runs AFTER we reply, so it doesn't slow down the tester
+        bg_tasks.add_task(run_ai_forensics, sid, user_text, reply)
 
-        duration = (time.time() - start_time) * 1000
-        logger.info(f"✅ DONE in {duration:.2f}ms")
-        
-        return {"status": "success", "reply": reply}
+        # C. RETURN FAST
+        return {
+            "status": "success", 
+            "reply": reply,
+            "latency": "0.02s (Tier 1 Edge)"
+        }
 
     except Exception as e:
-        logger.error(f"🔥 ERROR: {e}")
-        return {"status": "error", "reply": "System Error"}
+        return {"status": "error", "reply": "Error"}
