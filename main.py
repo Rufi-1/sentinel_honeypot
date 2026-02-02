@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import logging
@@ -13,6 +13,7 @@ logger = logging.getLogger("uvicorn")
 
 app = FastAPI()
 
+# --- 1. ALLOW EVERYTHING (CORS) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,167 +22,104 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 1. THE CHARACTERS ---
+# --- 2. THE BRAIN (Heuristic Expert System) ---
 CHARACTERS = {
     "grandma": {
-        "name": "Mrs. Higgins",
         "opener": "Hello? Is this my grandson? I can't read this text very well.",
-        "style": "confused"
+        "fallback": "I am sorry dear, I don't understand. Can you call my landline?"
     },
     "student": {
-        "name": "Rohan",
         "opener": "Yo, who is this? Do I know you? I'm in a lecture.",
-        "style": "skeptical"
+        "fallback": "Bro, you're making no sense. Text me later."
     },
     "uncle": {
-        "name": "Uncle Raj",
         "opener": "Who gave you this number? Speak fast, I am busy.",
-        "style": "aggressive"
+        "fallback": "State your business clearly or I am blocking this number."
     }
 }
 
-# --- 2. THE KNOWLEDGE BASE (Common Scams) ---
-# Maps keywords to character-specific responses
 SCENARIO_DB = {
-    # [Keywords] -> [Grandma, Student, Uncle]
-    ("money", "transfer", "cash", "rupees", "paid"): [
-        "I have some cash in the biscuit tin. Do you want that?",
-        "Bro, I'm broke. Ask my dad if you want money.",
-        "I do not transfer money to strangers. Who are you?"
-    ],
-    ("bank", "sbi", "hdfc", "icici", "account"): [
-        "Which bank? The one near the vegetable market?",
-        "I don't even have a bank account yet, lol.",
-        "I will visit the branch manager personally. Don't call me."
-    ],
-    ("otp", "code", "pin", "password"): [
-        "Is the code the numbers on the back of the card?",
-        "You want my OTP? Nice try scammer.",
-        "NEVER ask for OTP. I am reporting this number."
-    ],
-    ("police", "jail", "arrest", "cbi"): [
-        "Police?! Oh my god, I didn't steal the extra sugar packet!",
-        "Lol police? For what? Downloading movies?",
-        "I know the Commissioner. Do not threaten me."
-    ],
-    ("lottery", "winner", "prize", "gift"): [
-        "A prize? Did I win the bingo at the community center?",
-        "Fake news. Stop spamming me.",
-        "I did not enter any lottery. Stop lying."
-    ],
-    ("click", "link", "website", "app", "download"): [
-        "I touched the blue text but nothing happened.",
-        "I'm not clicking that suspicious link, bro.",
-        "I do not download random apps on my business phone."
-    ]
+    ("money", "transfer", "cash", "rupees"): ["I have cash in the tin box. Do you want that?", "I'm broke bro.", "I do not transfer money to strangers."],
+    ("bank", "sbi", "hdfc", "account"): ["Which bank? The one near the market?", "I don't have a bank account lol.", "I will visit the branch personally."],
+    ("otp", "code", "pin"): ["Is the code the numbers on the back?", "Nice try scammer.", "NEVER ask for OTP. Reporting you."],
+    ("police", "jail", "block"): ["Police?! I didn't steal anything!", "Lol police? For what?", "I know the Commissioner. Back off."],
+    ("urgent", "immediate"): ["Why are you shouting? You are scaring me!", "Chill, why the rush?", "Do not pressure me."]
 }
 
-# --- 3. THE HEURISTIC ENGINE (Handles "Unknowns") ---
-def get_heuristic_reply(text, char_key):
-    """Generates a smart reply based on sentence structure when no keywords match."""
-    
-    # Analyze the input
-    is_question = "?" in text
-    is_shouting = text.isupper() or "!" in text
-    has_number = bool(re.search(r'\d+', text))
-    is_short = len(text.split()) < 3
-    
-    # 1. Handle Aggression/Urgency
-    if is_shouting:
-        if char_key == "grandma": return "Why are you shouting? You are scaring me!"
-        if char_key == "student": return "Woah, chill out. Why the caps?"
-        if char_key == "uncle":   return "Do not raise your voice at me!"
-
-    # 2. Handle Numbers (Likely amounts or codes)
-    if has_number:
-        if char_key == "grandma": return "I see some numbers... is that the amount I have to pay?"
-        if char_key == "student": return "What are those numbers? Is that a code?"
-        if char_key == "uncle":   return "I am not writing down those numbers. Send an email."
-
-    # 3. Handle Questions
-    if is_question:
-        if char_key == "grandma": return "I... I am not sure. Why do you ask?"
-        if char_key == "student": return "Why do you need to know that?"
-        if char_key == "uncle":   return "I ask the questions here. Who are you?"
-
-    # 4. Handle Short/Confusing messages
-    if is_short:
-        if char_key == "grandma": return "Hello? Are you still there?"
-        if char_key == "student": return "???"
-        if char_key == "uncle":   return "Speak clearly."
-
-    # 5. Ultimate Fallback (Polymorphic)
-    if char_key == "grandma": return "I am sorry, my hearing aid is whistling. Can you explain that again?"
-    if char_key == "student": return "Bro, I have no idea what you're talking about."
-    if char_key == "uncle":   return "This is a waste of my time. State your business or I hang up."
-
-# --- 4. SESSION STORAGE ---
 SESSIONS = {}
 
-# --- 5. THE HANDLER ---
-async def handle_chat(request: Request, bg_tasks: BackgroundTasks):
+def get_heuristic_reply(text, char_key):
+    # 1. Check Database
+    text_lower = text.lower()
+    for keywords, responses in SCENARIO_DB.items():
+        if any(k in text_lower for k in keywords):
+            if char_key == "grandma": return responses[0]
+            elif char_key == "student": return responses[1]
+            elif char_key == "uncle": return responses[2]
+    
+    # 2. Heuristic Fallback
+    if "?" in text:
+        if char_key == "grandma": return "I am not sure... why do you ask?"
+        if char_key == "student": return "Why do you need to know?"
+        if char_key == "uncle": return "I ask the questions here."
+        
+    return CHARACTERS[char_key]['fallback']
+
+# --- 3. THE UNIVERSAL VACUUM (Catch-All Route) ---
+# This matches ANY path and ANY method (GET, POST, OPTIONS, PUT)
+@app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
+async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks):
     start_time = time.time()
+    method = request.method
+    
+    # LOGGING: Finally see what the Tester is doing!
+    logger.info(f"🔔 HIT: {method} /{path_name}")
+
+    # A. HANDLE CORSIOPTIONS (The Handshake)
+    if method == "OPTIONS":
+        return Response(status_code=200)
+
+    # B. HANDLE GET (The Ping)
+    if method == "GET":
+        return {"status": "ONLINE", "mode": "UNIVERSAL_CATCH_ALL"}
+
+    # C. HANDLE POST (The Chat)
     try:
-        body = await request.body()
-        try: payload = json.loads(body.decode())
+        # 1. Try to read body
+        body_bytes = await request.body()
+        body_str = body_bytes.decode()
+        logger.info(f"📥 RAW BODY: {body_str}")
+
+        # 2. Parse JSON (Safely)
+        try: payload = json.loads(body_str)
         except: payload = {}
 
         sid = payload.get("sessionId") or "test-session"
         msg = payload.get("message", {})
-        user_text = msg.get("text", "") if isinstance(msg, dict) else str(msg)
-        user_lower = user_text.lower()
-
-        # A. Initialize Session
+        # Handle cases where message is just a string or a dict
+        if isinstance(msg, dict):
+            user_text = msg.get("text", "")
+        else:
+            user_text = str(msg)
+            
+        # 3. RUN LOGIC
         if sid not in SESSIONS:
             char_key = random.choice(list(CHARACTERS.keys()))
-            SESSIONS[sid] = {"persona": char_key, "history": []}
+            SESSIONS[sid] = {"persona": char_key}
             reply = CHARACTERS[char_key]['opener']
             logger.info(f"⚡ NEW SESSION: {char_key}")
-        
         else:
-            # B. Generate Reply
             char_key = SESSIONS[sid]['persona']
-            reply = None
-            
-            # Step 1: Check Knowledge Base (Exact Match)
-            for keywords, responses in SCENARIO_DB.items():
-                if any(k in user_lower for k in keywords):
-                    # Index 0=Grandma, 1=Student, 2=Uncle
-                    if char_key == "grandma": reply = responses[0]
-                    elif char_key == "student": reply = responses[1]
-                    elif char_key == "uncle": reply = responses[2]
-                    logger.info(f"🧠 KNOWLEDGE BASE HIT: {keywords[0]}")
-                    break
-            
-            # Step 2: Heuristic Engine (Smart Fallback)
-            if not reply:
-                reply = get_heuristic_reply(user_text, char_key)
-                logger.info(f"🧩 HEURISTIC ENGINE USED ({char_key})")
+            reply = get_heuristic_reply(user_text, char_key)
+            logger.info(f"🧠 REPLY generated for {char_key}")
 
-        # C. Update History
-        SESSIONS[sid]['history'].append({"role": "scammer", "content": user_text})
-        SESSIONS[sid]['history'].append({"role": "agent", "content": reply})
-
-        # D. Mock Intel Extraction (Background)
-        # (This is where you'd normally put the slow AI logic)
-        
+        # 4. RETURN (Fast!)
         duration = (time.time() - start_time) * 1000
-        logger.info(f"✅ REPLY TIME: {duration:.2f}ms")
+        logger.info(f"✅ DONE in {duration:.2f}ms")
         
         return {"status": "success", "reply": reply}
 
     except Exception as e:
-        logger.error(f"🔥 FATAL: {e}")
+        logger.error(f"🔥 CRASH: {e}")
+        # Even if we crash, return valid JSON so the tester doesn't error
         return {"status": "error", "reply": "System Error"}
-
-# --- ENDPOINTS ---
-@app.post("/api/chat")
-async def chat_endpoint(request: Request, bg_tasks: BackgroundTasks):
-    return await handle_chat(request, bg_tasks)
-
-@app.post("/")
-async def root_chat(request: Request, bg_tasks: BackgroundTasks):
-    return await handle_chat(request, bg_tasks)
-
-@app.get("/")
-def home(): return {"status": "ONLINE", "mode": "HEURISTIC_EXPERT_SYSTEM"}
