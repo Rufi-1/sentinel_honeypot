@@ -175,7 +175,7 @@ def get_reply(text, persona_name):
     return char['responses']['fallback']
 
 # --- 4. ENDPOINTS ---
-@app.api_route("/{path_name:path}", methods=["GET", "POST"])
+@app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks):
     
     # --- VISUALIZATION ENDPOINTS ---
@@ -238,3 +238,4 @@ async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks)
     except Exception as e:
         logger.error(f"Error: {e}")
         return {"status": "error", "reply": "System Error"}
+
