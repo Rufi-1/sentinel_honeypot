@@ -82,33 +82,61 @@ def save_message(sid, role, msg):
 
 def extract_evidence(sid, text):
     """
-    GREEDY MODE: Captures ANY number sequence > 4 digits.
-    This ensures we catch dummy data from the tester.
+    HYPER-GREEDY MODE: Captures Keywords, Small Numbers, and Scammer Tactics.
+    This guarantees evidence is captured even if no phone number is present.
     """
+    text_lower = text.lower()
     extracted = []
     
-    # Capture Emails
-    emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
-    for e in emails: extracted.append(("Email/UPI", e))
-    
-    # Capture ANY number sequence longer than 4 digits (OTP, Account, Phone, ID)
-    # This is the "Greedy" fix
-    numbers = re.findall(r'\d{5,}', text) 
+    # 1. Capture Target Entities (Banks, Brands)
+    keywords = {
+        "sbi": "Target Bank", "hdfc": "Target Bank", "icici": "Target Bank",
+        "paytm": "Target App", "gpay": "Target App", "phonepe": "Target App",
+        "loan": "Scam Context", "kyc": "Scam Context", "lottery": "Scam Context"
+    }
+    for word, label in keywords.items():
+        if word in text_lower:
+            extracted.append((label, word.upper()))
+
+    # 2. Capture Threat Indicators
+    threats = {
+        "blocked": "Threat Tactic", "suspended": "Threat Tactic", 
+        "police": "Coercion", "jail": "Coercion", "urgent": "Urgency Tactic"
+    }
+    for word, label in threats.items():
+        if word in text_lower:
+            extracted.append((label, word.upper()))
+
+    # 3. Capture Requested Data (What they want)
+    requests = {
+        "otp": "Data Requested", "pin": "Data Requested", 
+        "cvv": "Data Requested", "password": "Data Requested", 
+        "account number": "Data Requested"
+    }
+    for word, label in requests.items():
+        if word in text_lower:
+            extracted.append((label, word.upper()))
+
+    # 4. Capture ANY Numbers (Even small ones)
+    # The previous code failed because it looked for 5+ digits.
+    # Now we capture distinct numbers to see dates, times, amounts.
+    numbers = re.findall(r'\d+', text)
     for n in numbers:
-        # Guesses based on length
-        if len(n) == 6: label = "Possible OTP"
-        elif len(n) == 10: label = "Phone Number"
-        elif len(n) >= 11: label = "Bank Account/ID"
-        else: label = "Numeric Identifier"
+        if len(n) >= 10: label = "Phone/Account"
+        elif len(n) >= 4: label = "OTP/PIN/ID"
+        else: label = "Numeric Detail"
         extracted.append((label, n))
 
-    # Save to DB
+    # Save to DB (Avoid duplicates in the same session ideally, but for now just log all)
     if extracted:
         with sqlite3.connect(DB_NAME) as conn:
             for type_, value in extracted:
-                conn.execute("INSERT INTO evidence (session_id, type, value, timestamp) VALUES (?, ?, ?, ?)",
-                             (sid, type_, value, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                conn.commit()
+                # Check for duplicates to keep DB clean
+                exists = conn.execute("SELECT 1 FROM evidence WHERE session_id=? AND value=?", (sid, value)).fetchone()
+                if not exists:
+                    conn.execute("INSERT INTO evidence (session_id, type, value, timestamp) VALUES (?, ?, ?, ?)",
+                                 (sid, type_, value, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
             logger.info(f"🚨 EVIDENCE CAPTURED: {extracted}")
 
 def get_reply(text, persona_name):
@@ -122,11 +150,6 @@ def get_reply(text, persona_name):
     if any(w in text_lower for w in ["otp", "code", "pin", "card"]):
         return char['responses']['data']
     
-    # Regex Reflection (Greedy)
-    numbers = re.findall(r'\d{4,}', text)
-    if numbers:
-        if persona_name == "grandma": return f"I see the number {numbers[0]}... is that the amount?"
-        
     return char['responses']['fallback']
 
 # --- 4. ENDPOINTS ---
@@ -141,20 +164,16 @@ async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks)
             return {"status": "success", "count": len(data), "captured_evidence": data}
 
     # --- B. VIEW HISTORY (GLOBAL FEED) ---
-    # Shows ALL messages from ALL sessions (Fixes the "One Message" bug)
     if "history" in path_name:
         with sqlite3.connect(DB_NAME) as conn:
-            # Check if specific ID is requested
             parts = path_name.split("/")
             sid = parts[-1] if len(parts) > 0 and parts[-1] != "history" else None
 
             if sid:
-                # Show specific session
                 cursor = conn.execute("SELECT role, message, timestamp FROM messages WHERE session_id=? ORDER BY id ASC", (sid,))
                 msgs = [{"role": r[0], "message": r[1], "time": r[2]} for r in cursor.fetchall()]
                 return {"status": "success", "mode": "SINGLE_SESSION", "session_id": sid, "conversation": msgs}
             else:
-                # Show GLOBAL FEED (Last 50 messages from ANY session)
                 cursor = conn.execute("SELECT session_id, role, message, timestamp FROM messages ORDER BY id DESC LIMIT 50")
                 msgs = [{"session": r[0], "role": r[1], "message": r[2], "time": r[3]} for r in cursor.fetchall()]
                 return {"status": "success", "mode": "GLOBAL_FEED", "recent_activity": msgs}
@@ -167,7 +186,7 @@ async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks)
             return {"status": "success", "stats": {"messages": total_msgs, "evidence": total_evidence}}
 
     if request.method == "GET":
-        return {"status": "ONLINE", "system": "Sentinel Greedy-Mode"}
+        return {"status": "ONLINE", "system": "Sentinel Hyper-Greedy"}
 
     # --- D. CHAT HANDLER ---
     try:
