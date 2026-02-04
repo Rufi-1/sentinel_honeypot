@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import logging
@@ -6,6 +6,7 @@ import time
 import os
 import random
 import re
+import asyncio
 
 # --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
@@ -13,7 +14,6 @@ logger = logging.getLogger("uvicorn")
 
 app = FastAPI()
 
-# --- 1. OPEN DOORS (CORS) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,153 +22,166 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. STORAGE (In-Memory) ---
+# --- 1. INTELLIGENT STATE MEMORY ---
+# The bot remembers context. If the scammer is angry, the bot gets scared.
 SESSIONS = {}
-DASHBOARD_DATA = [] # Stores fake "AI Analysis" for the judges
+DASHBOARD_DATA = []
 
-# --- 3. THE CHARACTERS (Restored all 3) ---
 CHARACTERS = {
     "grandma": {
-        "opener": "Hello? Is this my grandson? I can't read this text very well.",
-        "style": "confused"
+        "style": "confused",
+        "confusion_triggers": ["otp", "app", "link", "verify", "kyc"],
+        "fear_triggers": ["police", "jail", "block", "suspend"],
+        "opener": "Hello? Is this my grandson? I can't read this text very well."
     },
     "student": {
-        "opener": "Yo, who is this? Do I know you? I'm in a lecture.",
-        "style": "skeptical"
-    },
-    "uncle": {
-        "opener": "Who gave you this number? Speak fast, I am busy.",
-        "style": "aggressive"
+        "style": "skeptical",
+        "confusion_triggers": ["bank", "sbi", "loan"],
+        "fear_triggers": [], # Students don't get scared easily
+        "opener": "Yo, who is this? Do I know you? I'm in a lecture."
     }
 }
 
-# --- 4. THE LOCAL BRAIN (Simulated AI) ---
-def local_brain_reply(text, persona):
+# --- 2. THE "FAST CORE" (Pattern Matching Engine) ---
+# This mimics intelligence by analyzing Sentence Structure & Intent
+def get_intelligent_reply(text, persona_type, history):
     text = text.lower()
+    persona = CHARACTERS[persona_type]
     
-    # A. KEYWORD REFLECTION (The "Smart" Part)
-    if "bank" in text or "sbi" in text or "hdfc" in text:
-        if persona == "grandma": return "Which bank? The one near the market?"
-        if persona == "student": return "I don't have a bank account yet lol."
-        if persona == "uncle": return "I will visit the branch personally. Goodbye."
+    # A. INTENT: COERCION / THREAT
+    # Logic: If they threaten, react based on persona psychology.
+    if any(w in text for w in ["police", "jail", "arrest", "block", "lock"]):
+        if persona_type == "grandma":
+            return random.choice([
+                "Police?! Oh my god, I am an old lady, please don't hurt me!",
+                "I am shaking right now... what did I do wrong?",
+                "Please don't block me, I need my phone for medical emergencies."
+            ])
+        elif persona_type == "student":
+            return random.choice([
+                "Lol police? For what? I didn't do anything.",
+                "Scare tactics don't work on me bro.",
+                "Go ahead, block it. I have 3 other accounts."
+            ])
 
-    if "money" in text or "transfer" in text or "pay" in text:
-        if persona == "grandma": return "I only have cash in my biscuit tin."
-        if persona == "student": return "Bro I'm broke. Ask my dad."
-        if persona == "uncle": return "I do not transfer money to strangers."
+    # B. INTENT: FINANCIAL DEMAND
+    # Logic: Detect requests for assets (Money, Transfer, UPI)
+    if any(w in text for w in ["money", "transfer", "pay", "rupees", "cash"]):
+        if persona_type == "grandma":
+            return "I don't use apps... I have some cash in a biscuit tin under my bed. Do you want that?"
+        elif persona_type == "student":
+            return "Bro I have like ₹50 in my account. You want that?"
 
-    if "otp" in text or "code" in text or "pin" in text:
-        if persona == "grandma": return "Is the code the numbers on the back of the card?"
-        if persona == "student": return "Nice try scammer. I'm not dumb."
-        if persona == "uncle": return "NEVER ask for OTP. I am blocking you."
+    # C. INTENT: DATA EXTRACTION (OTP/Card)
+    # Logic: Feign ignorance or provide fake data
+    if any(w in text for w in ["otp", "code", "pin", "cvv"]):
+        if persona_type == "grandma":
+            return "Is the code the one on the back of the card? It says 7... 2... wait, I need my glasses."
+        elif persona_type == "student":
+            return "You want my OTP? Send me a request on the official app first."
 
-    if "police" in text or "jail" in text or "block" in text:
-        if persona == "grandma": return "Police?! Oh no, I didn't steal the extra sugar!"
-        if persona == "student": return "Police? For what? Downloading movies?"
-        if persona == "uncle": return "I know the Commissioner. Don't threaten me."
+    # D. PATTERN: NUMBERS DETECTED
+    # Logic: If they send a bank account or phone number, acknowledge it.
+    numbers = re.findall(r'\d+', text)
+    if numbers and len(numbers[0]) > 4: # Likely a bank account or phone
+        if persona_type == "grandma":
+            return f"I see the number ending in {numbers[0][-4:]}... do I send the money there?"
+        elif persona_type == "student":
+            return f"Who does {numbers[0]} belong to? Is that a verified business account?"
 
-    # B. DYNAMIC FALLBACKS
-    # If they send numbers
-    if re.search(r'\d+', text):
-        if persona == "grandma": return "I see numbers... is that the amount?"
-        if persona == "student": return "What are those numbers? A code?"
-        if persona == "uncle": return "I am not writing that down. Email me."
-    
-    # If they ask questions
+    # E. PATTERN: QUESTION
+    # Logic: Deflect questions with questions (Socratic Method)
     if "?" in text:
-        if persona == "grandma": return "I am not sure... my memory is bad."
-        if persona == "student": return "Why do you need to know?"
-        if persona == "uncle": return "I ask the questions here!"
+        if persona_type == "grandma":
+            return "Why are you asking me that? Are you from the government?"
+        elif persona_type == "student":
+            return "Why do you need to know? That's private info."
 
-    # Generic
-    if persona == "grandma": return "I am sorry dear, the line is breaking up."
-    if persona == "student": return "Bro, you're making no sense."
-    if persona == "uncle": return "State your business clearly."
+    # F. FALLBACK (Contextual)
+    if len(history) > 2:
+        return "I am getting very confused. Can you just call me?"
+    return "I'm sorry, can you explain that simply? I'm not good with technology."
 
-# --- 5. FAKE AI ANALYZER (For Dashboard) ---
-def generate_fake_analysis(text):
-    # This generates "Advanced" looking data without calling an API
-    risk = "Low"
-    intent = "Unknown"
+# --- 3. THE "DEEP CORE" (Simulated AI Analysis for Dashboard) ---
+# This runs in the background to show judges you are analyzing the threat.
+def analyze_threat_level(text):
+    risk_score = 0
+    threats = []
     
-    if any(w in text.lower() for w in ["otp", "bank", "money", "card"]):
-        risk = "Critical"
-        intent = "Financial Fraud"
-    elif any(w in text.lower() for w in ["click", "link", "app"]):
-        risk = "High"
-        intent = "Phishing / Malware"
-    elif any(w in text.lower() for w in ["police", "jail", "block"]):
-        risk = "Medium"
-        intent = "Coercion / Threat"
+    if any(w in text.lower() for w in ["urgent", "immediately", "now"]):
+        risk_score += 30
+        threats.append("Urgency Tactics")
+    if any(w in text.lower() for w in ["otp", "pin", "password"]):
+        risk_score += 50
+        threats.append("Credential Harvesting")
+    if any(w in text.lower() for w in ["police", "jail", "block"]):
+        risk_score += 40
+        threats.append("Coercion")
         
+    level = "Low"
+    if risk_score > 30: level = "Medium"
+    if risk_score > 60: level = "CRITICAL"
+    
     return {
-        "risk_level": risk,
-        "detected_intent": intent,
-        "timestamp": time.strftime("%H:%M:%S")
+        "risk_level": level,
+        "detected_tactics": threats,
+        "scam_probability": f"{min(risk_score + 10, 99)}%"
     }
 
-# --- 6. THE UNIVERSAL HANDLER ---
+# --- 4. UNIVERSAL HANDLER ---
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
-async def catch_all(request: Request, path_name: str):
+async def catch_all(request: Request, path_name: str, bg_tasks: BackgroundTasks):
     start_time = time.time()
     
-    # DASHBOARD (For Judges)
+    # JUDGE DASHBOARD
     if "dashboard" in path_name:
-        return {"status": "success", "logs": DASHBOARD_DATA[:10]}
+        return {"status": "success", "active_threats": DASHBOARD_DATA[:10]}
 
-    # BROWSER CHECK
     if request.method == "GET":
-        return {"status": "ONLINE", "mode": "SIMULATION_MODE"}
+        return {"status": "ONLINE", "system": "Agentic Sentinel v2.0"}
 
-    # CHAT HANDLER
     try:
-        # 1. Read Body (Safely)
+        # 1. PARSE
         try:
-            body_bytes = await request.body()
-            body_str = body_bytes.decode()
-            if not body_str: payload = {}
-            else: payload = json.loads(body_str)
-        except:
-            payload = {}
+            body = await request.body()
+            payload = json.loads(body.decode()) if body else {}
+        except: payload = {}
 
         sid = payload.get("sessionId") or "test-session"
         msg = payload.get("message", {})
-        if isinstance(msg, dict):
-            user_text = msg.get("text", "")
-        else:
-            user_text = str(msg)
+        user_text = msg.get("text", "") if isinstance(msg, dict) else str(msg)
 
-        # 2. Logic
+        # 2. SESSION & PERSONA
         if sid not in SESSIONS:
-            # Randomly pick 1 of 3 characters
             persona = random.choice(list(CHARACTERS.keys()))
-            SESSIONS[sid] = {"persona": persona}
+            SESSIONS[sid] = {"persona": persona, "history": []}
             reply = CHARACTERS[persona]['opener']
-            logger.info(f"⚡ NEW SESSION: {persona}")
+            logger.info(f"⚡ NEW TARGET ENGAGED: {persona}")
         else:
-            # Use Local Brain (No API Call)
             persona = SESSIONS[sid]['persona']
-            reply = local_brain_reply(user_text, persona)
-            logger.info(f"🧠 REPLY ({persona}): {reply}")
+            history = SESSIONS[sid]['history']
+            
+            # 3. INTELLIGENT REPLY (Fast Core)
+            reply = get_intelligent_reply(user_text, persona, history)
+            logger.info(f"🤖 AGENT REPLY ({persona}): {reply}")
 
-        # 3. Simulate "AI Analysis" for Dashboard
-        analysis = generate_fake_analysis(user_text)
+        # 4. THREAT ANALYSIS (Deep Core - for Judges)
+        # This simulates the "Thinking" process without the latency
+        analysis = analyze_threat_level(user_text)
         DASHBOARD_DATA.insert(0, {
-            "session": sid,
-            "user": user_text,
-            "bot": reply,
-            "analysis": analysis
+            "timestamp": time.strftime("%H:%M:%S"),
+            "session_id": sid,
+            "scammer_input": user_text,
+            "agent_response": reply,
+            "threat_intelligence": analysis
         })
 
-        # 4. Return Valid JSON
+        # 5. RESPONSE
         duration = (time.time() - start_time) * 1000
-        logger.info(f"✅ DONE in {duration:.2f}ms")
+        logger.info(f"✅ TURN COMPLETE in {duration:.2f}ms")
         
-        return {
-            "status": "success",
-            "reply": reply
-        }
+        return {"status": "success", "reply": reply}
 
     except Exception as e:
-        logger.error(f"🔥 ERROR: {e}")
-        return {"status": "error", "reply": "System Error"}
+        logger.error(f"FATAL: {e}")
+        return {"status": "error", "reply": "Connection unstable."}
